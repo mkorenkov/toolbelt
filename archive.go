@@ -7,48 +7,53 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/mkorenkov/sparsed"
 )
 
 //IsGzip checks whether the given stream is gzipped.
-func IsGzip(r io.Reader) (bool, error) {
-	// http://stackoverflow.com/questions/28309988/how-to-read-from-either-gzip-or-plain-text-reader-in-golang
+func IsGzip(r io.ReadSeeker) (bool, error) {
 	bufferedReader := bufio.NewReader(r)
 	testBytes, err := bufferedReader.Peek(2) //read 2 bytes
 	if err != nil {
 		return false, err
 	}
+	// disregarding of reader.Peek docs, need to ofset the file back to beginning..
+	_, err = r.Seek(0, 0)
+	if err != nil {
+		return false, err
+	}
+	// http://stackoverflow.com/questions/28309988/how-to-read-from-either-gzip-or-plain-text-reader-in-golang
 	return testBytes[0] == 31 && testBytes[1] == 139, nil
 }
 
 //UntarFilename extracts archive at given path.
-func UntarFilename(sourcefile string) error {
-	file, err := os.Open(sourcefile)
+func UntarFilename(filename string, destinationDir string) error {
+	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	return UntarFile(file)
+	return UntarFile(file, destinationDir)
 }
 
 //UntarFile extracts archived file.
-func UntarFile(file *os.File) error {
+func UntarFile(file *os.File, destinationDir string) error {
 	isGzipped, err := IsGzip(file)
 	if err != nil {
 		return err
 	}
 
-	var fileReader io.ReadCloser
+	fileReader := io.ReadCloser(file)
 	if isGzipped {
 		fileReader, err = gzip.NewReader(file)
 		if err != nil {
 			return err
 		}
 		defer fileReader.Close()
-	} else {
-		fileReader = io.ReadCloser(file)
 	}
 
-	err = UntarStream(fileReader)
+	err = UntarStream(fileReader, destinationDir)
 	if err != nil {
 		return err
 	}
@@ -56,14 +61,13 @@ func UntarFile(file *os.File) error {
 }
 
 //UntarStream extracts tar from io.Reader.
-func UntarStream(fileReader io.Reader) error {
+func UntarStream(fileReader io.Reader, destinationDir string) error {
 	tarBallReader := tar.NewReader(fileReader)
 	for {
 		header, err := tarBallReader.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
+		if err == io.EOF {
+			break
+		} else if err != nil {
 			return err
 		}
 
@@ -72,7 +76,7 @@ func UntarStream(fileReader io.Reader) error {
 		switch header.Typeflag {
 		case tar.TypeDir:
 			// directory
-			err = os.MkdirAll(filename, os.FileMode(header.Mode))
+			err = os.MkdirAll(fmt.Sprintf("%v/%v", destinationDir, filename), os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
@@ -80,14 +84,19 @@ func UntarStream(fileReader io.Reader) error {
 		case tar.TypeReg:
 			// file
 			err := func() error {
-				writer, err := os.Create(filename)
+				w, err := os.OpenFile(fmt.Sprintf("%v/%v", destinationDir, filename), os.O_WRONLY|os.O_CREATE, os.FileMode(header.Mode))
 				if err != nil {
 					return err
 				}
-				defer writer.Close()
+				writer := sparsed.NewSparseFilesWriter(w)
+				defer func() {
+					if writer != nil {
+						writer.Flush()
+					}
+					w.Close()
+				}()
 
 				io.Copy(writer, tarBallReader)
-				err = os.Chmod(filename, os.FileMode(header.Mode))
 				if err != nil {
 					return err
 				}
