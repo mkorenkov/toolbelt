@@ -1,8 +1,10 @@
 package toolbelt
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
+	"time"
 )
 
 // OutputOf executes shell command with arguments
@@ -25,4 +27,30 @@ func Execute(command string, stdout io.Writer, stderr io.Writer, stdin io.Reader
 		return err
 	}
 	return nil
+}
+
+// ExecuteWithTimeout command with timeout in seconds and explicit stdout, stderr and stdin
+func ExecuteWithTimeout(command string, timeoutSeconds int, stdout io.Writer, stderr io.Writer, stdin io.Reader, arguments ...string) (timeout bool, err error) {
+	cmd := exec.Command(command, arguments...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Stdin = stdin
+	done := make(chan error, 1)
+	err = cmd.Start()
+	if err != nil {
+		return false, err
+	}
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case <-time.After(time.Duration(timeoutSeconds) * time.Second):
+		err := cmd.Process.Kill()
+		if err != nil {
+			return true, fmt.Errorf("failed to kill: %v", err)
+		}
+		return true, nil
+	case err := <-done:
+		return false, err
+	}
 }
